@@ -28,7 +28,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 
 	"migrated-app/internal/config"
 	"migrated-app/internal/taudis"
@@ -118,7 +120,7 @@ func run(ctx context.Context, dbPath, inPath, outPath string) error {
 		for i := range sortie {
 			sortie[i] = ' '
 		}
-		if cerr := disp.Call(ctx, kind, rec[kindLen+callerLen:], sortie, &cr, &rc); cerr != nil {
+		if cerr := disp.Call(callCtx, kind, rec[kindLen+callerLen:], sortie, &cr, &rc); cerr != nil {
 			if !errors.Is(cerr, tfcalc.ErrCalculatorUnavailable) {
 				failed = true
 			}
