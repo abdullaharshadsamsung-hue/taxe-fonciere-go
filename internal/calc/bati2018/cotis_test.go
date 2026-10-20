@@ -278,7 +278,7 @@ func TestParseNotNumericErrors(t *testing.T) {
 		{"BBTEIOM", "BBTEIOM", 396, " ", 396},
 		{"TAUCOM bad digit", "TAUCOM", 34, "X", 34},
 		{"TAUCOM bad sign", "TAUCOM", 43, "Z", 34},
-		{"BBTEOM(3) bad sign", "BBTEOM(3)", 324 + 24 + 2 + 9, " ", 324 + 24 + 3},
+		{"BBTEOM(3) bad sign", "BBTEOM(3)", 324 + 24 + 2 + 9, " ", 324 + 24 + 2},
 		{"FN900 bad sign", "FN900", 889, "z", 880},
 	}
 	for _, tt := range tests {
