@@ -47,7 +47,12 @@ func main() {
 	outPath := flag.String("out", "-", "output file ('-' = stdout)")
 	flag.Parse()
 
-	if err := run(context.Background(), cfg.DBPath, *inPath, *outPath); err != nil {
+	// Graceful stop: an interrupt is honoured between records, so the
+	// deferred Flush still writes every completed output record.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, cfg.DBPath, *inPath, *outPath)
+	stop()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tfcalc:", err)
 		os.Exit(1)
 	}
@@ -89,7 +94,12 @@ func run(ctx context.Context, dbPath, inPath, outPath string) error {
 	r := bufio.NewReader(in)
 	n := 0
 	failed := false
+	// The record in progress is completed even if a stop is requested.
+	callCtx := context.WithoutCancel(ctx)
 	for {
+		if ctx.Err() != nil {
+			return fmt.Errorf("interrupted after %d records: %w", n, ctx.Err())
+		}
 		rec, err := readRecord(r)
 		if err == io.EOF {
 			break
