@@ -1,34 +1,35 @@
+// Package config holds the command-line / environment configuration shared
+// by the batch runner (cmd/tfcalc) and the TAUDIS loader (cmd/taudisload).
 package config
 
-import "github.com/spf13/viper"
+import (
+	"flag"
+	"os"
+)
 
+// EnvDB is the environment variable giving the SQLite TAUDIS database
+// location. The -db flag, when given, overrides it.
+const EnvDB = "TFCALC_DB"
+
+// DefaultDB is the database location used when neither the flag nor the
+// environment variable is set.
+const DefaultDB = "taudis.db"
+
+// Config is the shared configuration.
 type Config struct {
-	DatabaseURL string `mapstructure:"DATABASE_URL"`
-	Port        string `mapstructure:"PORT"`
-	JWTSecret   string `mapstructure:"JWT_SECRET"`
+	// DBPath is the SQLite database file holding the taudis table.
+	DBPath string
 }
 
-func Load() (*Config, error) {
-	viper.AutomaticEnv()
-	// AutomaticEnv() alone does NOT make viper.Unmarshal() populate a
-	// mapstructure-tagged field from a real env var unless viper already
-	// "knows about" that key first (via SetDefault or an explicit BindEnv)
-	// — it only makes viper.Get(key) work directly. Without these, Unmarshal
-	// silently leaves DatabaseURL/JWTSecret as empty strings regardless of
-	// what's actually set in the real environment, and callers reading
-	// cfg.DatabaseURL fall back to whatever hardcoded default they have —
-	// PORT "worked" here only because SetDefault registers a key as a side
-	// effect, DatabaseURL/JWTSecret had no such registration. Real incident:
-	// a migrated app's DATABASE_URL was genuinely set to the correct
-	// per-migration Postgres sidecar DSN, but cfg.DatabaseURL still came
-	// back "" every time, so the app's own hardcoded main.go fallback DSN
-	// ran instead — wrong credentials, connection refused on every attempt.
-	viper.SetDefault("PORT", "8080")
-	_ = viper.BindEnv("DATABASE_URL")
-	_ = viper.BindEnv("JWT_SECRET")
-	var cfg Config
-	if err := viper.Unmarshal(&cfg); err != nil {
-		return nil, err
+// Register declares the shared flags on fs. Defaults come from the
+// environment, so the precedence is flag > environment > built-in default.
+// Read the returned Config after fs.Parse.
+func Register(fs *flag.FlagSet) *Config {
+	cfg := &Config{}
+	def := os.Getenv(EnvDB)
+	if def == "" {
+		def = DefaultDB
 	}
-	return &cfg, nil
+	fs.StringVar(&cfg.DBPath, "db", def, "SQLite TAUDIS database file (env "+EnvDB+")")
+	return cfg
 }
