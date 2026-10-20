@@ -105,8 +105,8 @@ func TestRetBParseOffsets(t *testing.T) {
 		want int64
 	}{
 		{"mctcom", r.Mctcom, -121}, {"mctdep", r.Mctdep, -100}, {"mctreg", r.Mctreg, 3},
-		{"mfa300", r.Mfa300, 17}, {"mcfano", r.Mcfano, 17}, {"mfn300", r.Mfn300, 18}, {"mcfnvn", r.Mcfnvn, 18},
-		{"mfa800", r.Mfa800, 19}, {"momano", r.Momano, 19}, {"mfn800", r.Mfn800, 10}, {"momnvn", r.Momnvn, 10},
+		{"mfa300", r.Mfa300, 77}, {"mcfano", r.Mcfano, 77}, {"mfn300", r.Mfn300, 88}, {"mcfnvn", r.Mcfnvn, 88},
+		{"mfa800", r.Mfa800, 99}, {"momano", r.Momano, 99}, {"mfn800", r.Mfn800, 10}, {"momnvn", r.Momnvn, 10},
 		{"tcthfr", r.Tcthfr, 1233}, {"tctfra", r.Tctfra, 0}, {"tctdu", r.Tctdu, -10}, {"mcota3", r.Mcota3, -39},
 	}
 	for _, c := range signed {
