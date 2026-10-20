@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -17,18 +18,20 @@ import (
 	"migrated-app/internal/rates"
 )
 
-// batiDecoder adapts the ZES return area (slot 2 = XBXTDDIR, slot 4 =
-// XBXTDSR) to the bati2018 rate set.
-//
-// MIGRATION_NOTE: the TEOM rates (TAU-C-PBBOM*) live in the COM segment
-// (slot 3); its accessors are not wired here, so Pbbom stays zero.
+// batiDecoder adapts the ZES return area (slot 2 = XBXTDDIR, slot 3 =
+// XBXTDCOM, slot 4 = XBXTDSR) to the bati2018 rate set.
 type batiDecoder struct{}
 
 func (batiDecoder) Decode(z *rates.ZES) bati2018.RateSet {
 	dir := zes.DIR(z[1])
+	com := zes.COM(z[2])
 	sr := zes.SR(z[3])
 	u := func(v uint64, _ bool) int64 { return int64(v) }
 	return bati2018.RateSet{
+		Pbbom: [bati2018.CotisOmCount]int64{
+			u(com.Pbbomp()), u(com.Pbboma()), u(com.Pbbomb()),
+			u(com.Pbbomc()), u(com.Pbbomd()), u(com.Pbbome()),
+		},
 		SrJan:       sr.JanRaw(),
 		SrDepdir:    sr.Depdir(),
 		SrCcocom:    sr.Ccocom(),
@@ -116,16 +119,28 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func buildRouter() http.Handler {
-	// EFITAUX2 (TAUDIS store) needs a real store not available here: nil
-	// behaves like a failed CALL (CR 24). FMSTAU2 uses the unavailable adapter.
-	base := rates.UnavailableBaseTaux{}
+func buildRouter(db *sql.DB) http.Handler {
+	// EFITAUX2 over the TAUDIS store, FMSTAU2 over the GPHXTD00 segments.
+	// Like the shared COBOL load modules, one instance of each rate program
+	// serves both calculators.
+	layouts, err := taudisLayouts()
+	if err != nil {
+		log.Fatal().Err(err).Msg("TAUDIS layouts")
+	}
+	taudisSrc, err := rates.NewTaudisSource(pgTaudisStore{db: db}, layouts)
+	if err != nil {
+		log.Fatal().Err(err).Msg("EFITAUX2 rate source")
+	}
+	base, err := rates.NewBaseTauxSource(pgPCBProvider{db: db}, baseTauxLayout{})
+	if err != nil {
+		log.Fatal().Err(err).Msg("FMSTAU2 rate source")
+	}
 
-	batiCalc, err := bati2018.NewCalculator(nil, base, batiDecoder{})
+	batiCalc, err := bati2018.NewCalculator(taudisSrc, base, batiDecoder{})
 	if err != nil {
 		log.Fatal().Err(err).Msg("bati2018 calculator")
 	}
-	nonBatiCalc, err := nonbati2018.NewCalculator(nil, base, nonBatiDecoder{})
+	nonBatiCalc, err := nonbati2018.NewCalculator(taudisSrc, base, nonBatiDecoder{})
 	if err != nil {
 		log.Fatal().Err(err).Msg("nonbati2018 calculator")
 	}
