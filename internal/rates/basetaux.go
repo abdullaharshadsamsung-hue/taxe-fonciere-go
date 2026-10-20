@@ -819,7 +819,9 @@ func (c *baseTauxCall) rechLabelIFP(ctx context.Context, ifp string, seg []byte,
 	if err != nil {
 		return err
 	}
-	if c.checkLabel(st) && onOK != nil {
+	// The copy into XB51 only happens when the segment was actually found:
+	// on 'GE' the I/O area is untouched and XB51 keeps the TEOM label.
+	if c.checkLabel(st) && st == dliStatusOK && onOK != nil {
 		onOK()
 	}
 	return nil
