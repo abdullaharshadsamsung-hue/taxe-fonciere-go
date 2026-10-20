@@ -2,10 +2,14 @@ package bati2018
 
 // This file is the Go port of EFITA3B8, the 2018 built-property (taxe
 // foncière bâtie) calculator. It validates the caller's 600-byte COMBAT
-// block, gets the rates through EFITAUX2 (PARM = 'M') or FMSTAU2 (any other
-// PARM) and caches them between calls. It then computes the contributions
-// and the management fees and returns the 600-byte RETOURB block plus the
-// CR / RC pair.
+// block and gets the rates through EFITAUX2 (PARM = 'M') or FMSTAU2 (any
+// other PARM), caching them between calls. It then computes the
+// contributions and the management fees and returns the 600-byte RETOURB
+// block plus the CR / RC pair.
+//
+// MIGRATION_NOTE: EFITA3B8 performs no schema creation and no file or
+// database I/O of its own. Rate access is delegated to EFITAUX2 / FMSTAU2,
+// ported in internal/rates. No DDL is therefore required here.
 
 import (
 	"context"
@@ -21,23 +25,27 @@ import (
 const (
 	// CRValidation is the CR set by every parameter check.
 	CRValidation = 12
-	// RCBadArticleCode: CCOBNB is not '2' (built article).
+	// RCBadArticleCode is set when CCOBNB is not 2 (built article).
 	RCBadArticleCode = 1
-	// RCBadYear: DAN is not '2018'.
+	// RCBadYear is set when DAN is not '2018'.
 	RCBadYear = 2
-	// RCBadOmZone: a GTAUOM fails the level-88 GTAUOM-OK.
+	// RCBadOmZone is set when a GTAUOM fails the level-88 GTAUOM-OK.
 	RCBadOmZone = 5
-	// RCBadOmBase: a non-blank GTAUOM has a non-numeric MBAOM.
+	// RCBadOmBase is set when a non-blank GTAUOM has a non-numeric MBAOM.
 	RCBadOmBase = 6
-	// RCBadBase: one of the taxable bases is not NUMERIC.
+	// RCBadBase is set when one of the taxable bases is not NUMERIC.
 	RCBadBase = 11
-	// CRCallFailed / RCCallFailed: CALL ... ON EXCEPTION.
+	// CRCallFailed is the CR set by CALL ... ON EXCEPTION.
 	CRCallFailed = 24
+	// RCCallFailed is the RC set by CALL ... ON EXCEPTION.
 	RCCallFailed = 1
 )
 
 // TaxYear is the only tax year this calculator accepts (COMBAT-DAN).
 const TaxYear = "2018"
+
+// ArticleCodeBuilt is the only COMBAT-CCOBNB value accepted (built article).
+const ArticleCodeBuilt = 2
 
 // ParmTaudis is the PARM value that selects EFITAUX2 (CROISIC, general TF
 // roll). Any other value selects FMSTAU2 (MAJIC).
@@ -96,7 +104,7 @@ type RateSet struct {
 //
 // MIGRATION_NOTE: injected so this calculator does not depend on accessor
 // names of internal/layout/zes that were not verified at migration time;
-// the wiring code must supply an adapter over zes.AN/DIR/COM/SR.
+// the wiring code must supply an adapter over the XBXTD* layouts.
 type RateDecoder interface {
 	Decode(z *rates.ZES) RateSet
 }
@@ -117,6 +125,15 @@ type Output struct {
 	RC int
 }
 
+// totals are the W-TOTCOTOM / W-TOTCOT3 / W-TOTCOT8 / W-TOTCOT9 working
+// fields (PIC S9(11) GLOBAL).
+type totals struct {
+	om int64
+	t3 int64
+	t8 int64
+	t9 int64
+}
+
 // Calculator is the EFITA3B8 port. Like the non-INITIAL COBOL program, it
 // keeps the last rate segments (and the ZES area) between calls and reuses
 // them when year, direction, commune and IFP are unchanged. Safe for
@@ -130,6 +147,10 @@ type Calculator struct {
 	zes    rates.ZES
 	rates  RateSet
 	cached bool // false = TAU-R-ROL never filled: the cache test never matches
+
+	// lastTotals mirrors the GLOBAL working-storage totals, which keep the
+	// value of the last successful calculation between calls.
+	lastTotals totals
 }
 
 // NewCalculator builds the calculator. taudis (EFITAUX2) and base (FMSTAU2)
@@ -140,6 +161,8 @@ func NewCalculator(taudis TaudisFetcher, base rates.BaseTauxFetcher, decoder Rat
 		return nil, fmt.Errorf("bati2018: nil rate decoder")
 	}
 	c := &Calculator{taudis: taudis, base: base, decoder: decoder}
+	// ZES has no VALUE clause; spaces is the conventional initial content
+	// (same choice as internal/rates).
 	for i := range c.zes {
 		for j := range c.zes[i] {
 			c.zes[i][j] = ' '
@@ -151,8 +174,8 @@ func NewCalculator(taudis TaudisFetcher, base rates.BaseTauxFetcher, decoder Rat
 // Calculate runs EFITA3B8 for one article. combatm is COMBATM (moved as a
 // group: padded with spaces / truncated to 600 bytes); parm is PARM X.
 // A Go error is returned only for conditions that would abend the COBOL
-// program (rate source infrastructure failure); every functional problem is
-// reported through Output.CR / Output.RC.
+// program (rate source infrastructure failure, layout misuse); every
+// functional problem is reported through Output.CR / Output.RC.
 func (c *Calculator) Calculate(ctx context.Context, combatm []byte, parm string) (Output, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -176,11 +199,12 @@ func (c *Calculator) Calculate(ctx context.Context, combatm []byte, parm string)
 		}
 	}
 
-	cotis, err := c.compute(&combat)
+	cotis, tot, err := c.compute(&combat)
 	if err != nil {
 		return out, err
 	}
-	if err := fillRetour(&out.Retour, &cotis); err != nil {
+	c.lastTotals = tot
+	if err := fillRetour(&out.Retour, &cotis, tot); err != nil {
 		return out, err
 	}
 	// MIGRATION_NOTE: like the source, the calculation still runs after a
@@ -197,9 +221,30 @@ func moveCombat(b []byte) linkage.Combat {
 	return cb
 }
 
-// validate runs every check; the last failing check sets CR / RC.
+// ccobnbDigit returns the numeric value of COMBAT-CCOBNB as a COBOL numeric
+// comparison / numeric MOVE sees it: the digit nibble of the byte.
+//
+// MIGRATION_NOTE: XCOMBAT was not available; CCOBNB is assumed to be a
+// one-byte PIC 9 DISPLAY field. The source compares it with the numeric
+// literal 2, which IBM COBOL performs on the digit (low) nibble, ignoring
+// the zone. A blank field reads as 0 and is rejected.
+func ccobnbDigit(cb *linkage.Combat) int64 {
+	s := cb.Ccobnb()
+	if len(s) == 0 {
+		return 0
+	}
+	d := int64(s[0] & 0x0F)
+	if d > 9 {
+		return 0
+	}
+	return d
+}
+
+// validate runs every check; the last failing check sets CR / RC (the
+// source does not stop at the first failure). Blank OM zones get their
+// base forced to zero, as in the source.
 func validate(cb *linkage.Combat) (cr, rc int, err error) {
-	if cb.Ccobnb() != "2" {
+	if ccobnbDigit(cb) != ArticleCodeBuilt {
 		cr, rc = CRValidation, RCBadArticleCode
 	}
 	if cb.DanRaw() != TaxYear {
@@ -276,15 +321,15 @@ func (c *Calculator) fetch(ctx context.Context, cb *linkage.Combat, parm string)
 		if c.taudis == nil {
 			cr, rc = CRCallFailed, RCCallFailed // ON EXCEPTION: ZES unchanged
 		} else {
-			res, err := c.taudis.Fetch(ctx, rates.Request{
+			res, ferr := c.taudis.Fetch(ctx, rates.Request{
 				Animp:  cb.DanRaw(),
 				Coddir: cb.Ac3dir(),
 				Codcom: cb.Ccocom(),
 				Ccoifp: cb.Ccoifp(),
 				Ccpper: cb.Ccpper(),
 			})
-			if err != nil {
-				return 0, 0, fmt.Errorf("bati2018: EFITAUX2: %w", err)
+			if ferr != nil {
+				return 0, 0, fmt.Errorf("bati2018: EFITAUX2: %w", ferr)
 			}
 			cr, rc, c.zes = res.CR, res.RC, res.ZES
 		}
@@ -292,14 +337,14 @@ func (c *Calculator) fetch(ctx context.Context, cb *linkage.Combat, parm string)
 		if c.base == nil {
 			cr, rc = CRCallFailed, RCCallFailed
 		} else {
-			res, err := c.base.Fetch(ctx, rates.BaseTauxRequest{
+			res, ferr := c.base.Fetch(ctx, rates.BaseTauxRequest{
 				Janipt: cb.DanRaw(),
 				Acodir: cb.Ac3dir(),
 				Ccocom: cb.Ccocom(),
 				Ccoifp: cb.Ccoifp(),
 			})
-			if err != nil {
-				return 0, 0, fmt.Errorf("bati2018: FMSTAU2: %w", err)
+			if ferr != nil {
+				return 0, 0, fmt.Errorf("bati2018: FMSTAU2: %w", ferr)
 			}
 			cr, rc, c.zes = res.CR, res.RC, res.ZES
 		}
@@ -313,14 +358,15 @@ func (c *Calculator) fetch(ctx context.Context, cb *linkage.Combat, parm string)
 	return cr, rc, nil
 }
 
-// compute builds COTISB (bases, rates, contributions and fees).
-func (c *Calculator) compute(cb *linkage.Combat) (Cotis, error) {
+// compute builds COTISB (bases, rates, contributions and fees) and returns
+// it together with the working totals used to fill RETOURB.
+func (c *Calculator) compute(cb *linkage.Combat) (Cotis, totals, error) {
 	ct := NewCotis()
 	r := &c.rates
 
 	ct.Cle = cb.Aidfic()
 	ct.Anupro = cb.Anupro()
-	ct.Acodb = truncUnsigned(int64(cb.Ccobnb()[0]&0x0F), 1)
+	ct.Acodb = truncUnsigned(ccobnbDigit(cb), 1)
 	ct.Impot = "I"
 	ct.Gnexpl = "BN"
 
@@ -345,18 +391,18 @@ func (c *Calculator) compute(cb *linkage.Combat) (Cotis, error) {
 	for i := range ct.Bbtsen {
 		v, _, err := cb.Mbbt13(i)
 		if err != nil {
-			return ct, err
+			return ct, totals{}, err
 		}
 		ct.Bbtsen[i] = v
 	}
 	for i := range ct.TabOm {
 		g, err := cb.Gtauom(i)
 		if err != nil {
-			return ct, err
+			return ct, totals{}, err
 		}
 		v, _, err := cb.Mbaom(i)
 		if err != nil {
-			return ct, err
+			return ct, totals{}, err
 		}
 		ct.TabOm[i] = OmZone{Gtauom: g, Bbteom: v}
 	}
@@ -374,6 +420,7 @@ func (c *Calculator) compute(cb *linkage.Combat) (Cotis, error) {
 
 	// Household waste (TEOM) by zone. BASEB-GTAUOM holds the same value as
 	// COTISB-GTAUOM, so BASEB (never returned) is not materialised.
+	// WHEN OTHER CONTINUE leaves the INITIALIZEd zero in place.
 	for i, z := range ct.TabOm {
 		switch z.Gtauom {
 		case "  ":
@@ -395,24 +442,25 @@ func (c *Calculator) compute(cb *linkage.Combat) (Cotis, error) {
 	// TEOMI: MVLTIM is not checked for NUMERIC by the source.
 	ct.CotisOmi, _ = cb.Mvltim()
 
-	// Fees. The source sums COTIS-OM(1..7): occurrence 7 is FA300 in
-	// storage (still zero here), reproduced through CotisOmSubscript.
-	var totOm int64
+	// Fees. The source sums COTIS-OM(1..7): occurrence 7 lies outside the
+	// 6-entry table (FA300 in storage, still zero here); reproduced through
+	// CotisOmSubscript.
+	var t totals
 	for ind := 1; ind <= CotisOmCount+1; ind++ {
 		v, err := ct.CotisOmSubscript(ind)
 		if err != nil {
-			return ct, err
+			return ct, totals{}, err
 		}
-		totOm = truncSigned(totOm+v, totDigits)
+		t.om = truncSigned(t.om+v, totDigits)
 	}
-	totOm = truncSigned(totOm+ct.CotisOmi, totDigits)
-	c3 := truncSigned(ct.Coticom+ct.Cotidep+ct.Coticu+ct.Mcoge3, totDigits)
-	c8 := truncSigned(totOm+ct.Cotisyn+ct.Mcota3, totDigits)
-	c9 := truncSigned(ct.Cotitsen[0]+ct.Cotitsen[1], totDigits)
+	t.om = truncSigned(t.om+ct.CotisOmi, totDigits)
+	t.t3 = truncSigned(ct.Coticom+ct.Cotidep+ct.Coticu+ct.Mcoge3, totDigits)
+	t.t8 = truncSigned(t.om+ct.Cotisyn+ct.Mcota3, totDigits)
+	t.t9 = truncSigned(ct.Cotitsen[0]+ct.Cotitsen[1], totDigits)
 
-	ct.Fa300, ct.Fn300 = fees(c3, f300Arn, f300Frs)
-	ct.Fa800, ct.Fn800 = fees(c8, f800Arn, f800Frs)
-	ct.Fa900, ct.Fn900 = fees(c9, f900Arn, f900Frs)
+	ct.Fa300, ct.Fn300 = fees(t.t3, f300Arn, f300Frs)
+	ct.Fa800, ct.Fn800 = fees(t.t8, f800Arn, f800Frs)
+	ct.Fa900, ct.Fn900 = fees(t.t9, f900Arn, f900Frs)
 	// Rebalance so that assessment fees >= relief fees (8% and 9% only).
 	if ct.Fa800 < ct.Fn800 {
 		ct.Fa800 = truncSigned(ct.Fa800+1, amtDigits)
@@ -423,39 +471,11 @@ func (c *Calculator) compute(cb *linkage.Combat) (Cotis, error) {
 		ct.Fn900 = truncSigned(ct.Fn900-1, amtDigits)
 	}
 
-	c.lastTotals = totals{om: totOm, t3: c3, t8: c8, t9: c9}
-	return ct, nil
+	return ct, t, nil
 }
-
-// totals are the W-TOTCOTOM / W-TOTCOT3/8/9 working fields.
-type totals struct{ om, t3, t8, t9 int64 }
-
-// lastTotals is kept on the calculator like the GLOBAL WORKING-STORAGE.
-var _ = totals{}
 
 // fillRetour fills RETOURB from COTISB and the working totals.
-func fillRetour(rb *linkage.RetB, ct *Cotis) error {
-	return fillRetourTotals(rb, ct, totalsOf(ct))
-}
-
-// totalsOf recomputes the working totals from COTISB exactly as the source
-// does (used by fillRetour so the function stays self-contained).
-func totalsOf(ct *Cotis) totals {
-	var om int64
-	for _, v := range ct.CotisOm {
-		om = truncSigned(om+v, totDigits)
-	}
-	// COTIS-OM(7) quirk: FA300 was zero when the sum was taken.
-	om = truncSigned(om+ct.CotisOmi, totDigits)
-	return totals{
-		om: om,
-		t3: truncSigned(ct.Coticom+ct.Cotidep+ct.Coticu+ct.Mcoge3, totDigits),
-		t8: truncSigned(om+ct.Cotisyn+ct.Mcota3, totDigits),
-		t9: truncSigned(ct.Cotitsen[0]+ct.Cotitsen[1], totDigits),
-	}
-}
-
-func fillRetourTotals(rb *linkage.RetB, ct *Cotis, t totals) error {
+func fillRetour(rb *linkage.RetB, ct *Cotis, t totals) error {
 	rb.SetAidfic(ct.Cle)
 	rb.SetAnupro(ct.Anupro)
 	rb.SetCcobnb(formatUnsigned(ct.Acodb, 1))
@@ -491,9 +511,12 @@ func fillRetourTotals(rb *linkage.RetB, ct *Cotis, t totals) error {
 	rb.SetMfa900(ct.Fa900)
 	rb.SetMfn900(ct.Fn900)
 
-	rb.SetTctfra(ct.Fa300 + ct.Fn300 + ct.Fa800 + ct.Fn800 + ct.Fa900 + ct.Fn900)
-	tcthfr, _ := rb.Tcthfr() // stored (truncated) value, as the source reads it
-	rb.SetTctdu(tcthfr + ct.Fa300 + ct.Fn300 + ct.Fa800 + ct.Fn800 + ct.Fa900 + ct.Fn900)
+	feesTotal := ct.Fa300 + ct.Fn300 + ct.Fa800 + ct.Fn800 + ct.Fa900 + ct.Fn900
+	rb.SetTctfra(feesTotal)
+	// TCTDU is computed from the stored (truncated) RETOURB-TCTHFR, as the
+	// source reads it back from RETOURB.
+	tcthfr, _ := rb.Tcthfr()
+	rb.SetTctdu(tcthfr + feesTotal)
 	return nil
 }
 
