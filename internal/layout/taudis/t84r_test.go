@@ -62,12 +62,12 @@ func TestFieldOffsets(t *testing.T) {
 		{"PTBSYN", 40, 10, tresoUnsigned},
 		{"PTBTSN(1)", 29 + 4*11, 10, tresoUnsigned},
 		{"PTBTSN(2)", 29 + 5*11, 10, tresoUnsigned},
-		{"PBBOME", 29 + 28*11, 10, tresoUnsigned},
-		{"NTXOM", 348, 1, tresoUnsigned},
-		{"TBBCO", 350, 15, tresoUnsigned},
-		{"TBBTSN(2)", 350 + 5*16, 15, tresoUnsigned},
-		{"TBBOM2", 350 + 24*16, 15, tresoUnsigned},
-		{"MCBCO3", 350 + 25*16, 10, tresoUnsigned},
+		{"PBBOME", 29 + 25*11, 10, tresoUnsigned},
+		{"NTXOM", 315, 1, tresoUnsigned},
+		{"TBBCO", 317, 15, tresoUnsigned},
+		{"TBBTSN(2)", 317 + 5*16, 15, tresoUnsigned},
+		{"TBBOM2", 317 + 23*16, 15, tresoUnsigned},
+		{"MCBCO3", 317 + 24*16, 10, tresoUnsigned},
 		{"LIBRE", BodyLen - 312, 312, tresoAlpha},
 	}
 	for _, tc := range tests {
@@ -187,6 +187,7 @@ func TestTypedRateAccessors(t *testing.T) {
 		field string
 		get   func(r *IFPTreso) (uint64, bool)
 	}{
+		{"NTXOM", (*IFPTreso).Ntxom}, // 9(1): must get a single-digit value
 		{"PTBCOM", (*IFPTreso).Ptbcom}, {"PNBCOM", (*IFPTreso).Pnbcom},
 		{"PTBSYN", (*IFPTreso).Ptbsyn}, {"PNBSYN", (*IFPTreso).Pnbsyn},
 		{"PTBCU", (*IFPTreso).Ptbcu}, {"PNBCU", (*IFPTreso).Pnbcu},
