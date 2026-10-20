@@ -1,38 +1,33 @@
-# DGFiP Taxe Foncière: Go Port
+# DGFiP Taxe Foncière (Go)
 
-This project is a Go port of a COBOL codebase that calculates French property tax (*taxe foncière*). The original was a plain COBOL codebase with no framework. The port covers two calculations:
+A Go migration of the DGFiP *taxe foncière* (French property tax) calculation, originally written in COBOL. It calculates taxe foncière for **built** properties (*bâti*) and **unbuilt** properties (*non bâti*), using the 2018 calculation rules (`bati2018`, `nonbati2018`). The calculation is exposed in four ways:
 
-- **Built property** (*propriétés bâties*), for the 2018 rules.
-- **Unbuilt property** (*propriétés non bâties*), for the 2018 rules.
+- an HTTP server (`cmd/server`)
+- a command-line calculator (`cmd/tfcalc`)
+- a loader for TAUDIS rate data (`cmd/taudisload`)
+- a Go package (`pkg/tfcalc`)
 
-The calculation logic, the COBOL record and linkage layouts, and the rate tables are now Go packages. An HTTP server in `cmd/server` exposes them.
-
-> **Status: the migration is not complete.**
->
-> - 20 of 23 modules were migrated.
-> - The project builds, and the Go unit tests pass.
-> - **No one has compared its behavior with the original COBOL programs.** No request has been confirmed to produce the same result as the original.
-> - The 93% figure is the migration model's own estimate. It is not a measured result.
-> - Do not use this for real tax calculations until the outputs have been checked against the COBOL system.
+> **Status:** The project builds and its unit tests pass. Its behavior has **not** been compared with the original COBOL programs. Do not use it for production tax calculations until that comparison is done. See [Known limitations](#known-limitations) and [Manual review required](#manual-review-required).
 
 ## Tech stack
 
-- **Language:** Go, standard library layout (`cmd/`, `internal/`)
-- **Modules:** managed with `go.mod` and `go.sum`
-- **Runtime:** a single HTTP server binary built from `./cmd/server`
-- **Database:** reached through `DATABASE_URL`. A PostgreSQL instance was used during migration (see [Database](#database)).
+| Component | Technology |
+|---|---|
+| Language | Go (standard toolchain, Go modules: `go.mod` / `go.sum`) |
+| Database | PostgreSQL (reached through `DATABASE_URL`) |
+| Interfaces | HTTP server, CLI, Go library package |
 
 ## Prerequisites
 
 - **Go 1.27.** The migration was built and tested with the `golang:1.27-alpine` toolchain.
-- **A PostgreSQL instance** that you can reach with a connection URL.
-- **A POSIX shell** with `mkdir`, for the commands below.
+- **A running PostgreSQL instance** that the server can reach.
+- A POSIX shell to run the commands below.
 
 ## Getting started
 
-Run these steps in order from the root of a fresh clone.
+Run these steps in order, from the root of a fresh clone.
 
-### 1. Install dependencies and build
+### 1. Install dependencies and build the server
 
 ```sh
 go mod download
@@ -40,23 +35,27 @@ mkdir -p bin
 go build -o bin/server ./cmd/server
 ```
 
-This creates the server binary at `bin/server`.
-
 ### 2. Configure the environment
 
 ```sh
-export DATABASE_URL='postgres://USER:PASSWORD@HOST:5432/DBNAME?sslmode=disable'
+export DATABASE_URL="postgres://USER:PASSWORD@HOST:5432/DBNAME?sslmode=disable"
 export PORT=8080
-export JWT_SECRET='replace-with-a-long-random-secret'
+export JWT_SECRET="change-me"
 ```
 
-See [Environment variables](#environment-variables) for details on each variable.
+Replace the placeholder values with your own. See [Environment variables](#environment-variables) for what each variable does.
 
-### 3. Database setup
+### 3. Set up the database
 
-The migration did not provide any schema, migration or seed commands. There is no database setup step to run.
+No database setup command was recorded for this migration.
 
-Make sure the database named in `DATABASE_URL` exists and accepts connections before you start the server.
+- The TAUDIS storage schema is defined in `internal/taudis/schema.go`.
+- A loader for TAUDIS data is provided in `cmd/taudisload/main.go`.
+
+Before you run the server, confirm the following in that code:
+
+- how the schema gets created
+- how the TAUDIS data gets loaded
 
 ### 4. Run the server
 
@@ -64,21 +63,20 @@ Make sure the database named in `DATABASE_URL` exists and accepts connections be
 ./bin/server
 ```
 
-With `PORT=8080`, the server listens on `http://localhost:8080`.
+The server listens on port **8080**. You can reach it at `http://localhost:8080`.
 
 ### A first request to try
 
-No request has been confirmed to return the same answer as the original system, so this README does not list an example request.
-
-The HTTP routes are defined in `cmd/server/router.go`. Treat any response from them as unverified until it has been compared with the COBOL output.
+No request has yet been checked against the original system's behavior, so this README does not list one. The HTTP routes are defined in `cmd/server/router.go`.
 
 ## Database
 
-| | |
+| | Database |
 |---|---|
-| **Now** | The server reads a connection URL from `DATABASE_URL`. During migration it ran against a PostgreSQL instance, which is the only database it has been run with. |
-| **Original** | This README does not document how the original COBOL codebase accessed data. |
-| **Why it changed** | No reason was recorded. |
+| Original (COBOL) | No database platform was recorded for the original codebase. |
+| Migrated (Go) | PostgreSQL, configured through `DATABASE_URL`. |
+
+The reason for introducing PostgreSQL was not recorded during the migration. Before deploying, check that the data held in PostgreSQL (TAUDIS rates, see `internal/taudis/`) matches the data the original programs used.
 
 ## Running tests
 
@@ -86,100 +84,89 @@ The HTTP routes are defined in `cmd/server/router.go`. Treat any response from t
 go test ./...
 ```
 
-The Go unit tests passed during migration.
+All target unit tests passed during the migration. These tests check the Go code on its own terms. They do **not** show that the Go code produces the same results as the original COBOL programs.
 
-These packages have no test file:
+The following packages have no test files:
 
-- `internal/calc/nonbati2018/calc.go`
+- `internal/calc/nonbati2018/calc.go` (only `cotis.go` is tested)
 - `internal/config`
-- `cmd/server`
-
-Passing unit tests do not show that the code behaves like the original. That comparison has not been run.
+- `internal/taudis`
+- `pkg/tfcalc`
+- all `cmd/*` programs
 
 ## Environment variables
 
-| Variable | Required | Purpose |
+| Variable | Required | Description |
 |---|---|---|
-| `DATABASE_URL` | Yes | Connection URL for the database used by the server (PostgreSQL during migration). |
-| `PORT` | Yes | TCP port the HTTP server listens on. The migration ran with `8080`. |
-| `JWT_SECRET` | Yes | Secret the server uses for JWT handling. Use a long random value and never commit it. |
+| `DATABASE_URL` | Yes | PostgreSQL connection string used by the server. |
+| `PORT` | Yes | HTTP listen port. Port `8080` was used during the migration. |
+| `JWT_SECRET` | Yes | Secret used by the server for JWT handling. Use a strong, private value outside local development. |
+
+Configuration loading is implemented in `internal/config/config.go`.
 
 ## Architecture overview
 
 ```
-cmd/server/            HTTP server entry point
-  main.go              startup and wiring
-  router.go            HTTP route definitions
-  store.go             database access (DATABASE_URL)
-  layouts.go           server-side use of the record layouts
-
-internal/config/       configuration loading (config.go)
-
-internal/dispatch/     entry points that route a request to the right calculation
-  bati.go              built-property dispatch
-  nonbati.go           unbuilt-property dispatch
-
-internal/calc/
-  bati2018/            built-property calculation, 2018 rules (calc.go, cotis.go)
-  nonbati2018/         unbuilt-property calculation, 2018 rules (calc.go, cotis.go)
-
-internal/layout/       Go equivalents of COBOL record layouts
-  linkage/             call interfaces: combat, comnba, retb, retnb
-  taudis/              rate-distribution table records: t800, t84c, t84d, t84r
-  zes/                 data area layouts: an, com, dir, sr
-
-internal/rates/        rate data access
-  basetaux.go          base rates
-  taudis.go            rate-distribution tables
+cmd/
+  server/         HTTP server: entry point (main.go), routes (router.go),
+                  data access (store.go), request/response layouts (layouts.go)
+  tfcalc/         Command-line calculator
+  taudisload/     Loader for TAUDIS rate data
+pkg/
+  tfcalc/         Public Go API for the tax calculation
+internal/
+  calc/
+    bati2018/     Built-property calculation (calc.go) and contributions (cotis.go)
+    nonbati2018/  Unbuilt-property calculation (calc.go) and contributions (cotis.go)
+  dispatch/       Routes bâti / non-bâti requests to the correct calculator
+  layout/
+    linkage/      Translated COBOL linkage records:
+                  COMBAT, COMNBA (inputs); RETB, RETNB (returns)
+    taudis/       TAUDIS record layouts: T800, T84C, T84D, T84R
+    zes/          ZES record layouts: AN, COM, DIR, SR
+  rates/          Rate handling: base rates (basetaux.go), TAUDIS rates (taudis.go)
+  taudis/         TAUDIS persistence: schema (schema.go) and store (store.go)
+  config/         Environment-based configuration
 ```
 
-### How a request flows
-
-1. `cmd/server` receives an HTTP request and decodes it using the `internal/layout` types.
-2. It hands the request to `internal/dispatch`, which picks the built or unbuilt calculation.
-3. The calculation in `internal/calc/...` computes the assessments (`cotis.go`), using rates from `internal/rates`.
-4. The result goes back in the return layouts: `retb` for built property, `retnb` for unbuilt property.
-
-### Where the COBOL code went
-
-The package names keep the original COBOL member names. For example:
-
-| Original member | Go file |
-|---|---|
-| `T84R` | `internal/layout/taudis/t84r.go` |
-| `COMBAT` | `internal/layout/linkage/combat.go` |
-| `RETB` | `internal/layout/linkage/retb.go` |
+**Request flow.** A request enters through `cmd/server`, `cmd/tfcalc` or `pkg/tfcalc`. `internal/dispatch` then selects the bâti or non-bâti calculator in `internal/calc`. The calculator reads rates through `internal/rates`, which is backed by `internal/taudis`. Inputs and outputs keep the structure of the original COBOL records, as defined in `internal/layout`.
 
 ## Migration notes
 
-| | |
-|---|---|
-| **Direction** | COBOL with no framework → Go, standard project layout |
-| **Recorded changes from the original** | None. No intentional differences in behavior, interfaces or data handling were documented. |
-| **Structural change** | COBOL programs and copybooks became Go packages. COBOL linkage sections and record layouts became Go types under `internal/layout`. |
-
-The original was a batch- and linkage-call codebase. The Go port adds an HTTP server (`cmd/server`), configured through `PORT`, `DATABASE_URL` and `JWT_SECRET`. The reason for this change was not recorded.
+- **Source → target:** COBOL → Go (standard toolchain).
+- **Modules migrated:** 20 of 23. The migration did not record which 3 modules are missing. It also listed no untranslated or unmigrable files. Resolve this discrepancy before relying on the code (see [Known limitations](#known-limitations)).
+- **Recorded changes from the original:** none. No behavioral, structural or data-format changes were recorded.
+  - PostgreSQL configuration (`DATABASE_URL`) appears in the migrated project, but no change or reason was recorded for it.
+  - JWT configuration (`JWT_SECRET`) appears in the migrated project, but no change or reason was recorded for it.
+- **Confidence:** the migration's own estimate is 93%. This is a self-assessment, not a measured result.
 
 ## Known limitations
 
-- **Behavior has not been compared with the original.** Nothing confirms that the Go code produces the same tax amounts, rounding or field formatting as the COBOL programs.
-- **Three modules are unaccounted for.** Only 20 of 23 modules were migrated, but no untranslated files were listed. The 3 missing modules need to be identified against the original source tree.
-- **No verified HTTP requests.** The server's endpoints have not been checked against reference outputs.
-- **No database setup.** No schema or setup commands came with the migration. The tables `cmd/server/store.go` expects must be created by hand.
-- **Unit test coverage has gaps.** See [Running tests](#running-tests) for the packages without tests.
+- **Behavior not verified against the original.** No outputs from the Go code have been compared with outputs from the COBOL programs. Tax amounts, rounding and edge cases may differ.
+- **3 of 23 modules unaccounted for.** The migration reports 20 of 23 modules migrated, but does not identify which 3 are missing or why.
+- **No verified HTTP requests.** No endpoint has been confirmed to respond the way the original system does.
+- **No recorded database setup.** There is no documented step for creating the schema or loading TAUDIS data.
+- **Partial test coverage.** Several packages have no tests (see [Running tests](#running-tests)), including the unbuilt-property calculation in `internal/calc/nonbati2018/calc.go`.
 
 ## Manual review required
 
-The migration model rated these original COBOL modules as low confidence. Review their Go counterparts line by line against the original source:
+The migration flagged the following original COBOL modules as **low confidence**. For each one, find its Go counterpart and check it line by line against the COBOL source.
 
-| Go file | Notes |
+| Original module | Notes |
 |---|---|
-| `internal/layout/taudis/t84r.go` | Counterpart of the low-confidence `T84R` copybook. |
+| T84R | TAUDIS T84R record. Likely counterpart: `internal/layout/taudis/t84r.go`. |
+| XCOTB | Copybook. Locate its Go counterpart and verify field layouts. |
+| EFITAUX2 | Program. Locate its Go counterpart. |
+| FMSTAU2 | Program. Locate its Go counterpart. |
+| EFITA3B8 | Program (bâti). Check against `internal/calc/bati2018/`. |
+| EFITA3N8 | Program (non bâti). Check against `internal/calc/nonbati2018/`. |
+| CTXTA3B | Program (bâti). Locate its Go counterpart. |
+| CTXTA3N | Program (non bâti). Locate its Go counterpart. |
 
-When reviewing, focus on:
+The bâti / non-bâti suggestions above are inferred from the module names only. Confirm each mapping yourself.
 
-- **Decimal arithmetic.** Check how COBOL `COMP-3` and implied-decimal fields map to Go types, and whether rounding and truncation match.
-- **Field widths, padding and offsets** in `internal/layout/...`.
-- **Rate table lookups and edge cases** in `internal/rates/basetaux.go` and `internal/rates/taudis.go`.
+Also review:
 
-Before anyone relies on the output, set up a side-by-side comparison against the COBOL programs using real input records.
+- `internal/calc/nonbati2018/calc.go`, because it has no unit tests.
+- Server configuration and authentication (`internal/config/config.go`, `cmd/server/`), because the use of `JWT_SECRET` has no documented counterpart in the original system.
+- The database schema and loader (`internal/taudis/schema.go`, `cmd/taudisload/main.go`), to make sure the rate data matches what the original programs consumed.
