@@ -474,6 +474,21 @@ func (c *Calculator) compute(cb *linkage.Combat) (Cotis, totals, error) {
 	return ct, t, nil
 }
 
+// totalsOf computes the working totals (W-TOTCOTOM, W-TOTCOT3/8/9) from the
+// contributions of ct. TCTOM is the sum of the six TEOM zones plus TEOMI;
+// the fees (FA300 ...) never enter it.
+func totalsOf(ct *Cotis) totals {
+	var t totals
+	for _, v := range ct.CotisOm {
+		t.om = truncSigned(t.om+v, totDigits)
+	}
+	t.om = truncSigned(t.om+ct.CotisOmi, totDigits)
+	t.t3 = truncSigned(ct.Coticom+ct.Cotidep+ct.Coticu+ct.Mcoge3, totDigits)
+	t.t8 = truncSigned(t.om+ct.Cotisyn+ct.Mcota3, totDigits)
+	t.t9 = truncSigned(ct.Cotitsen[0]+ct.Cotitsen[1], totDigits)
+	return t
+}
+
 // fillRetour fills RETOURB from COTISB and the working totals.
 func fillRetour(rb *linkage.RetB, ct *Cotis, t totals) error {
 	rb.SetAidfic(ct.Cle)
