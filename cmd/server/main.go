@@ -15,9 +15,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		log.Fatal().Msg("DATABASE_URL is not set")
+	}
+	db, err := openDB(ctx, dbURL)
+	if err != nil {
+		log.Fatal().Err(err).Msg("database connection failed")
+	}
+	defer db.Close()
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
 	srv := &http.Server{
-		Addr:    ":8080",
-		Handler: buildRouter(),
+		Addr:    ":" + port,
+		Handler: buildRouter(db),
 	}
 
 	go func() {
@@ -26,7 +41,7 @@ func main() {
 		}
 	}()
 
-	log.Info().Msg("server started on :8080")
+	log.Info().Msg("server started on :" + port)
 	<-ctx.Done()
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
