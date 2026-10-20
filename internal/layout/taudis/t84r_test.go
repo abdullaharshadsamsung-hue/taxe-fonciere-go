@@ -201,7 +201,7 @@ func TestTypedRateAccessors(t *testing.T) {
 	for i, tc := range tests {
 		t.Run(tc.field, func(t *testing.T) {
 			r := mustNew(t)
-			want := uint64(i + 1)
+			want := uint64(i%9 + 1) // single digit so NTXOM 9(1) can hold it
 			if err := r.SetNum(tc.field, want); err != nil {
 				t.Fatal(err)
 			}
@@ -391,7 +391,7 @@ func TestSignedValues(t *testing.T) {
 		{name: "plain", raw: "0000000123", want: 123, wantOK: true},
 		{name: "gnu-neg", raw: "000000012s", want: -123, wantOK: true},
 		{name: "bad-last", raw: "000000012 ", want: 120, wantOK: false},
-		{name: "bad-body", raw: "00000A012C", want: 1123, wantOK: false},
+		{name: "bad-body", raw: "000000A12C", want: 1123, wantOK: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
